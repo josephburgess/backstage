@@ -8,84 +8,145 @@ resource "digitalocean_droplet" "breeze" {
   name      = "breeze-app"
   region    = "nyc1"
   size      = "s-1vcpu-1gb"
+  ipv6      = true
   ssh_keys  = [digitalocean_ssh_key.breeze.fingerprint]
 
-user_data = <<-EOF
-  #!/bin/bash
-  apt update
-  apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx
-  systemctl enable --now docker
-
-  cat > /etc/nginx/sites-available/breeze.joeburgess.dev << 'NGINX'
-  server {
-      listen 80;
-      server_name breeze.joeburgess.dev;
-
-      location / {
-          proxy_pass http://localhost:8080;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-      }
+  # Copy scripts to the server
+  provisioner "file" {
+    source      = "${path.module}/scripts/configure_docker.sh"
+    destination = "/tmp/configure_docker.sh"
+    connection {
+      type        = "ssh"
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+      host        = self.ipv4_address
+    }
   }
-  NGINX
 
-  ln -sf /etc/nginx/sites-available/breeze.joeburgess.dev /etc/nginx/sites-enabled/
-
-  # personal site config
-  cat > /etc/nginx/sites-available/joeburgess.dev << 'NGINX'
-  server {
-      listen 80;
-      server_name joeburgess.dev www.joeburgess.dev;
-
-      root /var/www/html;
-      index index.html;
-
-      location / {
-          try_files $uri $uri/ =404;
-      }
+  provisioner "file" {
+    source      = "${path.module}/scripts/configure_nginx.sh"
+    destination = "/tmp/configure_nginx.sh"
+    connection {
+      type        = "ssh"
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+      host        = self.ipv4_address
+    }
   }
-  NGINX
 
-  ln -sf /etc/nginx/sites-available/joeburgess.dev /etc/nginx/sites-enabled/
+  # provisioner "file" {
+  #   source      = "${path.module}/scripts/setup_ssl.sh"
+  #   destination = "/tmp/setup_ssl.sh"
+  #   connection {
+  #     type        = "ssh"
+  #     user        = "root"
+  #     private_key = file(var.ssh_private_key_path)
+  #     host        = self.ipv4_address
+  #   }
+  # }
 
-  # Create a simple index.html file for testing
-  mkdir -p /var/www/html
-  echo "<h1>Welcome to JoeBurgess.dev</h1>" > /var/www/html/index.html
+  provisioner "file" {
+    source      = "${path.module}/scripts/init.sh"
+    destination = "/tmp/init.sh"
+    connection {
+      type        = "ssh"
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+      host        = self.ipv4_address
+    }
+  }
 
-  nginx -t && systemctl restart nginx
-EOF
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /tmp/*.sh",
+      "bash /tmp/init.sh"
+    ]
+    connection {
+      type        = "ssh"
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+      host        = self.ipv4_address
+    }
+  }
 }
 
 resource "digitalocean_domain" "default" {
   name = "joeburgess.dev"
 }
 
+resource "digitalocean_reserved_ip" "breeze_ip" {
+  region     = digitalocean_droplet.breeze.region
+  droplet_id = digitalocean_droplet.breeze.id
+}
+
 resource "digitalocean_record" "breeze" {
-  domain = digitalocean_domain.default.name
-  type   = "A"
-  name   = "breeze"
-  value  = digitalocean_droplet.breeze.ipv4_address
+  domain     = digitalocean_domain.default.name
+  type       = "A"
+  name       = "breeze"
+  value      = digitalocean_reserved_ip.breeze_ip.ip_address
+  ttl        = 3600
+  depends_on = [digitalocean_domain.default, digitalocean_reserved_ip.breeze_ip]
+}
 
+resource "digitalocean_record" "breeze_ipv6" {
+  domain     = digitalocean_domain.default.name
+  type       = "AAAA"
+  name       = "breeze"
+  ttl        = 3600
+  value      = digitalocean_droplet.breeze.ipv6_address
   depends_on = [digitalocean_domain.default]
-}
-
-output "droplet_ip" {
-  value = digitalocean_droplet.breeze.ipv4_address
-}
-
-output "breeze_url" {
-  value = "http://breeze.joeburgess.dev"
 }
 
 resource "digitalocean_record" "root" {
-  domain = digitalocean_domain.default.name
-  type   = "A"
-  name   = "@"
-  value  = digitalocean_droplet.breeze.ipv4_address
+  domain     = digitalocean_domain.default.name
+  type       = "A"
+  name       = "@"
+  value      = digitalocean_reserved_ip.breeze_ip.ip_address
+  ttl        = 3600
+  depends_on = [digitalocean_domain.default, digitalocean_reserved_ip.breeze_ip]
+}
 
+
+resource "digitalocean_record" "root_ipv6" {
+  domain     = digitalocean_domain.default.name
+  type       = "AAAA"
+  name       = "@"
+  ttl        = 3600
+  value      = digitalocean_droplet.breeze.ipv6_address
   depends_on = [digitalocean_domain.default]
 }
 
-output "root_url" {
-  value = "http://joeburgess.dev"
+resource "digitalocean_record" "www" {
+  domain     = digitalocean_domain.default.name
+  type       = "A"
+  name       = "www"
+  value      = digitalocean_reserved_ip.breeze_ip.ip_address
+  ttl        = 3600
+  depends_on = [digitalocean_domain.default, digitalocean_reserved_ip.breeze_ip]
 }
+
+resource "digitalocean_record" "www_ipv6" {
+  domain     = digitalocean_domain.default.name
+  type       = "AAAA"
+  name       = "www"
+  ttl        = 3600
+  value      = digitalocean_droplet.breeze.ipv6_address
+  depends_on = [digitalocean_domain.default]
+}
+
+output "reserved_ipv4" {
+  value = digitalocean_reserved_ip.breeze_ip.ip_address
+}
+
+output "droplet_ipv6" {
+  value = digitalocean_droplet.breeze.ipv6_address
+}
+
+output "joeburgess_url" {
+  value = "https://joeburgess.dev"
+}
+
+output "breeze_url" {
+  value = "https://breeze.joeburgess.dev"
+}
+
